@@ -9,11 +9,11 @@ A simple script that hits a few APIs (Tavily, Yahoo Finance, OpenAI/Claude) to a
 ## What it does
 
 - **Web Search**: Uses Tavily to pull recent news and info.
-- **Tadawul Quotes**: Fetches live stock prices for Saudi companies using `yfinance`.
-- **VAT Calculator**: Simple tool to add or extract the 15% ZATCA VAT.
-- **SAMA Rates**: Returns current Saudi Central Bank interest rates.
+- **Finance Calc**: Unified tool for VAT (ZATCA 15%), Tadawul quotes (`yfinance`), and SAMA policy rates.
+- **CR Lookup**: Ministry of Commerce Commercial Registration records (10-digit CR) — Arabic/English legal name, status, capital, ISIC codes.
+- **Vision 2030 Alignment**: Scores a business activity against the 3 Vision 2030 pillars and 8 flagship programs (NEOM, Red Sea, Qiddiya, ROSHN, Saudi Green Initiative, FSDP, NIDLP, HCDP).
 
-Saves conversation history to a local SQLite database so you don't lose your chat if you close it.
+Conversation memory persists to **SQLite** for local dev or **PostgreSQL** for deployment — configurable via `DB_TYPE`.
 
 ---
 
@@ -95,10 +95,63 @@ Runs basic checks against the tools.
 
 ---
 
-## Known issues right now
+## Deploying with Postgres
 
-- Tadawul stock data has a 15-minute delay via yfinance. 
-- Vision 2030 knowledge and Ministry of Commerce CR lookups aren't supported yet (needs a real database).
+The memory layer supports two backends. SQLite is the default for local dev. For anything shared or long-lived, set `DB_TYPE=postgres`.
+
+### Docker Compose
+
+```bash
+cp .env.example .env
+docker compose up -d postgres
+docker compose run --rm agent --healthcheck
+docker compose run --rm agent "Check CR 1010000001 and its Vision 2030 alignment"
+```
+
+The `postgres:16-alpine` container uses a named volume (`saudi-agent-pgdata`) and the init script at `deploy/postgres/init.sql` (which just enables `pgcrypto` + `pg_stat_statements`). The agent service waits on `pg_isready`.
+
+### Managed Postgres (RDS / Cloud SQL / Neon / ...)
+
+```bash
+export DB_TYPE=postgres
+export DATABASE_URL=postgresql://user:pass@host:5432/saudi_agent
+export DB_SSLMODE=require
+export DB_POOL_MIN=2 DB_POOL_MAX=20
+python main.py --migrate
+python main.py --healthcheck
+python main.py "Check CR 1010000001"
+```
+
+### Env vars
+
+| Var | Default | Notes |
+| --- | --- | --- |
+| `DATABASE_URL` | required | libpq DSN |
+| `DB_POOL_MIN` / `DB_POOL_MAX` | 1 / 10 | pool sizing |
+| `DB_CONNECT_TIMEOUT` | 5 | seconds |
+| `DB_STATEMENT_TIMEOUT_MS` | 30000 | server-side statement timeout |
+| `DB_RETRY_ATTEMPTS` | 5 | retries on OperationalError/InterfaceError |
+| `DB_RETRY_BASE_DELAY` | 0.5 | first retry delay, doubles each attempt |
+| `DB_SSLMODE` | prefer | disable / prefer / require / verify-ca / verify-full |
+| `DB_APPLICATION_NAME` | saudi-research-agent | shows up in `pg_stat_activity` |
+
+### Migrations
+
+`memory/migrations.py` keeps the schema versioned in a `schema_version` table. On startup anything unapplied runs in a single transaction.
+
+- v1 — `conversations` + `messages` with `TIMESTAMPTZ`, `JSONB`, FK cascade.
+- v2 — composite index on `(conversation_id, created_at)` + GIN index on `content_json`.
+
+### Health
+
+`python main.py --healthcheck` prints JSON with `ok`, latency, server version, schema version, and pool sizing. Exit code 0/1. The Dockerfile's `HEALTHCHECK` calls the same path.
+
+---
+
+## Known issues
+
+- Tadawul quotes have a ~15-minute delay via yfinance.
+- `cr_lookup` runs off a small fixture set. Swap it for the real MoC API once you have accredited credentials.
 
 ---
 
